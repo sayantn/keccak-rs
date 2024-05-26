@@ -1,0 +1,13 @@
+[package]
+name = "keccak"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "benchmark"
+
+[features]
+nightly = []
+
+[dependencies]
+cfg-if = "1.0.0"
