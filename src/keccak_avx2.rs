@@ -35,6 +35,47 @@ const MAPS:[__m128i; 5] = unsafe { mem::transmute([
     6, 12, 18, 24
 ]) };
 
+#[inline(always)]
+unsafe fn xor(a: __m256i, b: __m256i) -> __m256i {
+    _mm256_xor_si256(a, b)
+}
+
+#[inline(always)]
+unsafe fn rolv(a: __m256i, idx: usize) -> __m256i {
+    _mm256_or_si256(_mm256_sllv_epi64(a, LEFT_SHIFTS[idx]), _mm256_srlv_epi64(a, RIGHT_SHIFTS[idx]))
+}
+
+#[inline(always)]
+unsafe fn rol1(a: __m256i) -> __m256i {
+    _mm256_or_si256(_mm256_slli_epi64::<1>(a), _mm256_srli_epi64::<63>(a))
+}
+
+#[inline(always)]
+unsafe fn perm<const PERM: i32>(a: __m256i) -> __m256i {
+    _mm256_permute4x64_epi64::<PERM>(a)
+}
+
+#[inline(always)]
+unsafe fn blend<const BLEND: i32>(a: __m256i, b: __m256i) -> __m256i {
+    _mm256_blend_epi32::<BLEND>(a, b)
+}
+
+#[inline(always)]
+unsafe fn and_not(a: __m256i, b: __m256i) -> __m256i {
+    _mm256_andnot_si256(a, b)
+}
+
+/// takes 0:63 from a, 64:127 from b, 128:191 from c, 192:255 from d
+#[inline(always)]
+unsafe fn build(a: __m256i, b: __m256i, c: __m256i, d: __m256i) -> __m256i {
+    blend::<0xc0>(blend::<0x30>(blend::<0x0c>(a, b), c), d)
+}
+
+#[inline(always)]
+unsafe fn gather(slice: &[u64], map: __m128i, mask: __m256i) -> __m256i {
+    _mm256_mask_i32gather_epi64::<8>(_mm256_setzero_si256(), slice.as_ptr().cast(), map, mask)
+}
+
 #[derive(Debug, Copy, Clone)]
 pub struct KeccakState(__m256i, __m256i, __m256i, __m256i, __m256i, __m256i, __m256i);
 
@@ -148,47 +189,6 @@ impl<const LANES: usize> BitXor<[u64; LANES]> for KeccakState {
     }
 }
 
-#[inline(always)]
-unsafe fn xor(a: __m256i, b: __m256i) -> __m256i {
-    _mm256_xor_si256(a, b)
-}
-
-#[inline(always)]
-unsafe fn rolv(a: __m256i, idx: usize) -> __m256i {
-    _mm256_or_si256(_mm256_sllv_epi64(a, LEFT_SHIFTS[idx]), _mm256_srlv_epi64(a, RIGHT_SHIFTS[idx]))
-}
-
-#[inline(always)]
-unsafe fn rol1(a: __m256i) -> __m256i {
-    _mm256_or_si256(_mm256_slli_epi64::<1>(a), _mm256_srli_epi64::<63>(a))
-}
-
-#[inline(always)]
-unsafe fn perm<const PERM: i32>(a: __m256i) -> __m256i {
-    _mm256_permute4x64_epi64::<PERM>(a)
-}
-
-#[inline(always)]
-unsafe fn blend<const BLEND: i32>(a: __m256i, b: __m256i) -> __m256i {
-    _mm256_blend_epi32::<BLEND>(a, b)
-}
-
-#[inline(always)]
-unsafe fn and_not(a: __m256i, b: __m256i) -> __m256i {
-    _mm256_andnot_si256(a, b)
-}
-
-/// takes 0:63 from a, 64:127 from b, 128:191 from c, 192:255 from d
-#[inline(always)]
-unsafe fn build(a: __m256i, b: __m256i, c: __m256i, d: __m256i) -> __m256i {
-    blend::<0xc0>(blend::<0x30>(blend::<0x0c>(a, b), c), d)
-}
-
-#[inline(always)]
-unsafe fn gather(slice: &[u64], map: __m128i, mask: __m256i) -> __m256i {
-    _mm256_mask_i32gather_epi64::<8>(_mm256_setzero_si256(), slice.as_ptr().cast(), map, mask)
-}
-
 impl KeccakState {
     pub fn keccak_p<const ROUNDS: usize>(&self) -> KeccakState {
         unsafe {
@@ -225,10 +225,7 @@ impl KeccakState {
                 let t13 = perm::<0x72>(t5);
 
                 let t7 = and_not(t8, _mm256_bsrli_epi128::<8>(t8));
-                t1 = and_not(
-                    blend::<0xc0>(perm::<0x39>(t8), t0),
-                    blend::<0x30>(perm::<0x1e>(t8), t0),
-                );
+                t1 = and_not(blend::<0xc0>(perm::<0x39>(t8), t0), blend::<0x30>(perm::<0x1e>(t8), t0));
                 t2 = and_not(build(t11, t12, t13, t10), build(t13, t11, t10, t12));
                 t3 = and_not(build(t9, t13, t11, t12), build(t11, t9, t12, t13));
                 t4 = and_not(build(t13, t10, t12, t9), build(t12, t13, t9, t10));

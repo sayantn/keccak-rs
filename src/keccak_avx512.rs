@@ -1,104 +1,40 @@
 // Implementation taken from XKCP
 
-#[cfg(target_arch = "x86")]
-use core::arch::x86::*;
-#[cfg(target_arch = "x86_64")]
+use crate::ROUND_CONSTANTS;
 use core::arch::x86_64::*;
+use core::mem;
 use core::ops::BitXor;
 
-use crate::ROUND_CONSTANTS;
+#[rustfmt::skip]
+const THETA_PERM: [__m512i; 4] = unsafe { mem::transmute([
+    4_u64, 0, 1, 2, 3, 5, 6, 7,
+    3, 4, 0, 1, 2, 5, 6, 7,
+    2, 3, 4, 0, 1, 5, 6, 7,
+    1, 2, 3, 4, 0, 5, 6, 7
+]) };
 
-const MOVE_THETA_PREV: __m512i = setr(4, 0, 1, 2, 3, 5, 6, 7);
-const MOVE_THETA_NEXT: __m512i = setr(1, 2, 3, 4, 0, 5, 6, 7);
+#[rustfmt::skip]
+const RHOTATES: [__m512i; 10] = unsafe { mem::transmute([
+    0_u64, 1, 62, 28, 27, 0, 0, 0,
+    36, 44, 6, 55, 20, 0, 0, 0,
+    3, 10, 43, 25, 39, 0, 0, 0,
+    41, 45, 15, 21, 8, 0, 0, 0,
+    18, 2, 61, 56, 14, 0, 0, 0,
+    0, 44, 43, 21, 14, 0, 0, 0,
+    18, 1, 6, 25, 8, 0, 0, 0,
+    41, 2, 62, 55, 39, 0, 0, 0,
+    3, 45, 61, 28, 20, 0, 0, 0,
+    36, 10, 15, 56, 27, 0, 0, 0
+]) };
 
-const RHO_B: __m512i = setr(0, 1, 62, 28, 27, 0, 0, 0);
-const RHO_G: __m512i = setr(36, 44, 6, 55, 20, 0, 0, 0);
-const RHO_K: __m512i = setr(3, 10, 43, 25, 39, 0, 0, 0);
-const RHO_M: __m512i = setr(41, 45, 15, 21, 8, 0, 0, 0);
-const RHO_S: __m512i = setr(18, 2, 61, 56, 14, 0, 0, 0);
-const PI_1B: __m512i = setr(0, 3, 1, 4, 2, 5, 6, 7);
-const PI_1G: __m512i = setr(1, 4, 2, 0, 3, 5, 6, 7);
-const PI_1K: __m512i = setr(2, 0, 3, 1, 4, 5, 6, 7);
-const PI_1M: __m512i = setr(3, 1, 4, 2, 0, 5, 6, 7);
-const PI_1S: __m512i = setr(4, 2, 0, 3, 1, 5, 6, 7);
-const PI_2S1: __m512i = setr(0, 1, 2, 3, 4, 5, 0 + 8, 2 + 8);
-const PI_2S2: __m512i = setr(0, 1, 2, 3, 4, 5, 1 + 8, 3 + 8);
-const PI_2BG: __m512i = setr(0, 1, 0 + 8, 1 + 8, 6, 5, 6, 7);
-const PI_2KM: __m512i = setr(2, 3, 2 + 8, 3 + 8, 7, 5, 6, 7);
-const PI_2S3: __m512i = setr(4, 5, 4 + 8, 5 + 8, 4, 5, 6, 7);
-
-#[derive(Debug, Copy, Clone)]
-pub struct KeccakState(__m512i, __m512i, __m512i, __m512i, __m512i);
-
-impl PartialEq for KeccakState {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe {
-            let acc = xor(self.0, other.0);
-            let acc = _mm512_or_si512(acc, xor(self.1, other.1));
-            let acc = _mm512_or_si512(acc, xor(self.2, other.2));
-            let acc = _mm512_or_si512(acc, xor(self.3, other.3));
-            let acc = _mm512_or_si512(acc, xor(self.4, other.4));
-            _mm512_test_epi64_mask(acc, acc) == 0xff
-        }
-    }
-}
-
-impl Eq for KeccakState {}
-
-impl From<[u64; 25]> for KeccakState {
-    fn from(value: [u64; 25]) -> Self {
-        unsafe {
-            Self(
-                load_plane(&value[0..]),
-                load_plane(&value[5..]),
-                load_plane(&value[10..]),
-                load_plane(&value[15..]),
-                load_plane(&value[20..]),
-            )
-        }
-    }
-}
-
-impl From<KeccakState> for [u64; 25] {
-    fn from(value: KeccakState) -> Self {
-        let mut ret = [0; 25];
-        unsafe {
-            store_plane(&mut ret[0..], value.0);
-            store_plane(&mut ret[5..], value.1);
-            store_plane(&mut ret[10..], value.2);
-            store_plane(&mut ret[15..], value.3);
-            store_plane(&mut ret[20..], value.4);
-        }
-        ret
-    }
-}
-
-impl<const LANES: usize> BitXor<[u64; LANES]> for KeccakState {
-    type Output = Self;
-
-    fn bitxor(self, rhs: [u64; LANES]) -> Self::Output {
-        assert!(LANES > 0);
-        assert!(LANES < 24);
-        let mask = 0x1f1f1f1f1f_u64 & ((1_u64 << LANES) - 1);
-        unsafe {
-            Self(
-                xor(self.0, _mm512_maskz_loadu_epi64((mask & 0xff) as __mmask8, rhs[0..].as_ptr().cast())),
-                xor(self.1, _mm512_maskz_loadu_epi64(((mask >> 8) & 0xff) as __mmask8, rhs[5..].as_ptr().cast())),
-                xor(self.2, _mm512_maskz_loadu_epi64(((mask >> 16) & 0xff) as __mmask8, rhs[10..].as_ptr().cast())),
-                xor(self.3, _mm512_maskz_loadu_epi64(((mask >> 24) & 0xff) as __mmask8, rhs[15..].as_ptr().cast())),
-                xor(self.4, _mm512_maskz_loadu_epi64(((mask >> 32) & 0xff) as __mmask8, rhs[25..].as_ptr().cast())),
-            )
-        }
-    }
-}
-
-const fn set(a: u64) -> __m512i {
-    setr(a as i64, 0, 0, 0, 0, 0, 0, 0)
-}
-
-const fn setr(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> __m512i {
-    unsafe { core::mem::transmute([a, b, c, d, e, f, g, h]) }
-}
+#[rustfmt::skip]
+const PI_PERM: [__m512i; 5] = unsafe { mem::transmute([
+    0_u64, 3, 1, 4, 2, 5, 6, 7,
+    1, 4, 2, 0, 3, 5, 6, 7,
+    2, 0, 3, 1, 4, 5, 6, 7,
+    3, 1, 4, 2, 0, 5, 6, 7,
+    4, 2, 0, 3, 1, 5, 6, 7
+]) };
 
 #[inline(always)]
 unsafe fn xor(a: __m512i, b: __m512i) -> __m512i {
@@ -116,75 +52,211 @@ unsafe fn chi(a: __m512i, b: __m512i, c: __m512i) -> __m512i {
 }
 
 #[inline(always)]
-unsafe fn load_plane(a: &[u64]) -> __m512i {
-    _mm512_maskz_loadu_epi64(0x1f, a.as_ptr().cast())
+unsafe fn perm(a: __m512i, b: __m512i) -> __m512i {
+    _mm512_permutexvar_epi64(a, b)
 }
 
 #[inline(always)]
-unsafe fn store_plane(a: &mut [u64], v: __m512i) {
-    _mm512_mask_storeu_epi64(a.as_mut_ptr().cast(), 0x1f, v)
+unsafe fn build(a: __m512i, b: __m512i, c: __m512i, d: __m512i, e: __m512i) -> __m512i {
+    let acc = _mm512_mask_blend_epi64(0x02, a, b);
+    let acc = _mm512_mask_blend_epi64(0x04, acc, c);
+    let acc = _mm512_mask_blend_epi64(0x08, acc, d);
+    _mm512_mask_blend_epi64(0x10, acc, e)
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct KeccakState(__m512i, __m512i, __m512i, __m512i, __m512i);
+
+impl PartialEq for KeccakState {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe {
+            let acc = xor(self.0, other.0);
+            let acc = _mm512_ternarylogic_epi64::<0xf6>(acc, self.1, other.1);
+            let acc = _mm512_ternarylogic_epi64::<0xf6>(acc, self.2, other.2);
+            let acc = _mm512_ternarylogic_epi64::<0xf6>(acc, self.3, other.3);
+            let acc = _mm512_ternarylogic_epi64::<0xf6>(acc, self.4, other.4);
+            _mm512_test_epi64_mask(acc, acc) & 0x1f == 0x1f
+        }
+    }
+}
+
+impl Eq for KeccakState {}
+
+impl From<[u64; 25]> for KeccakState {
+    fn from(value: [u64; 25]) -> Self {
+        unsafe {
+            Self(
+                _mm512_maskz_loadu_epi64(0x1f, value[0..].as_ptr().cast()),
+                _mm512_maskz_loadu_epi64(0x1f, value[5..].as_ptr().cast()),
+                _mm512_maskz_loadu_epi64(0x1f, value[10..].as_ptr().cast()),
+                _mm512_maskz_loadu_epi64(0x1f, value[15..].as_ptr().cast()),
+                _mm512_maskz_loadu_epi64(0x1f, value[20..].as_ptr().cast()),
+            )
+        }
+    }
+}
+
+impl From<KeccakState> for [u64; 25] {
+    fn from(value: KeccakState) -> Self {
+        let mut ret = [0; 25];
+        unsafe {
+            _mm512_mask_storeu_epi64(ret[0..].as_mut_ptr().cast(), 0x1f, value.0);
+            _mm512_mask_storeu_epi64(ret[5..].as_mut_ptr().cast(), 0x1f, value.1);
+            _mm512_mask_storeu_epi64(ret[10..].as_mut_ptr().cast(), 0x1f, value.2);
+            _mm512_mask_storeu_epi64(ret[15..].as_mut_ptr().cast(), 0x1f, value.3);
+            _mm512_mask_storeu_epi64(ret[20..].as_mut_ptr().cast(), 0x1f, value.4);
+        }
+        ret
+    }
+}
+
+impl<const LANES: usize> BitXor<[u64; LANES]> for KeccakState {
+    type Output = KeccakState;
+
+    fn bitxor(self, rhs: [u64; LANES]) -> Self::Output {
+        assert!(LANES > 0 && LANES <= 24);
+        let ptr = rhs.as_ptr().cast();
+        unsafe {
+            if LANES <= 5 {
+                let mask = 0x1f >> (5 - LANES);
+                Self(xor(self.0, _mm512_maskz_loadu_epi64(mask, ptr)), self.1, self.2, self.3, self.4)
+            } else if LANES <= 10 {
+                let mask = 0x1f >> (10 - LANES);
+                Self(
+                    xor(self.0, _mm512_maskz_loadu_epi64(0x1f, ptr)),
+                    xor(self.1, _mm512_maskz_loadu_epi64(mask, ptr.add(5))),
+                    self.2,
+                    self.3,
+                    self.4,
+                )
+            } else if LANES <= 15 {
+                let mask = 0x1f >> (15 - LANES);
+                Self(
+                    xor(self.0, _mm512_maskz_loadu_epi64(0x1f, ptr)),
+                    xor(self.1, _mm512_maskz_loadu_epi64(0x1f, ptr.add(5))),
+                    xor(self.2, _mm512_maskz_loadu_epi64(mask, ptr.add(10))),
+                    self.3,
+                    self.4,
+                )
+            } else if LANES <= 20 {
+                let mask = 0x1f >> (20 - LANES);
+                Self(
+                    xor(self.0, _mm512_maskz_loadu_epi64(0x1f, ptr)),
+                    xor(self.1, _mm512_maskz_loadu_epi64(0x1f, ptr.add(5))),
+                    xor(self.2, _mm512_maskz_loadu_epi64(0x1f, ptr.add(10))),
+                    xor(self.3, _mm512_maskz_loadu_epi64(mask, ptr.add(15))),
+                    self.4,
+                )
+            } else {
+                let mask = 0x1f >> (25 - LANES);
+                Self(
+                    xor(self.0, _mm512_maskz_loadu_epi64(0x1f, ptr)),
+                    xor(self.1, _mm512_maskz_loadu_epi64(0x1f, ptr.add(5))),
+                    xor(self.2, _mm512_maskz_loadu_epi64(0x1f, ptr.add(10))),
+                    xor(self.3, _mm512_maskz_loadu_epi64(0x1f, ptr.add(15))),
+                    xor(self.4, _mm512_maskz_loadu_epi64(mask, ptr.add(20))),
+                )
+            }
+        }
+    }
 }
 
 impl KeccakState {
     pub fn keccak_p<const ROUNDS: usize>(&self) -> Self {
-        assert!(ROUNDS <= 24);
+        let Self(mut s0, mut s1, mut s2, mut s3, mut s4) = self;
+
         unsafe {
-            let Self(mut b, mut g, mut k, mut m, mut s) = self;
+            let mut r = 24 - ROUNDS;
+            while r < 24 {
+                // Theta + Rho + Pi - Even Round
 
-            for i in 24 - ROUNDS..24 {
-                // Theta
-                let b0 = xor3(xor3(b, g, k), m, s);
-                let b1 = _mm512_permutexvar_epi64(MOVE_THETA_PREV, b0);
-                let b0 = _mm512_permutexvar_epi64(MOVE_THETA_NEXT, b0);
-                let b0 = _mm512_rol_epi64::<1>(b0);
+                let t5 = xor3(xor3(s0, s1, s2), s3, s4);
+                let t6 = perm(THETA_PERM[3], _mm512_rol_epi64::<1>(t5));
+                let t5 = perm(THETA_PERM[0], t5);
 
-                b = xor3(b, b0, b1);
-                g = xor3(g, b0, b1);
-                k = xor3(k, b0, b1);
-                m = xor3(m, b0, b1);
-                s = xor3(s, b0, b1);
-
-                // Rho
-                b = _mm512_rolv_epi64(b, RHO_B);
-                g = _mm512_rolv_epi64(g, RHO_G);
-                k = _mm512_rolv_epi64(k, RHO_K);
-                m = _mm512_rolv_epi64(m, RHO_M);
-                s = _mm512_rolv_epi64(s, RHO_S);
-
-                // Pi - Part 1
-                let b0 = _mm512_permutexvar_epi64(PI_1B, b);
-                let b1 = _mm512_permutexvar_epi64(PI_1G, g);
-                let b2 = _mm512_permutexvar_epi64(PI_1K, k);
-                let b3 = _mm512_permutexvar_epi64(PI_1M, m);
-                let b4 = _mm512_permutexvar_epi64(PI_1S, s);
+                s0 = perm(PI_PERM[0], _mm512_rolv_epi64(xor3(t5, t6, s0), RHOTATES[0]));
+                s1 = perm(PI_PERM[1], _mm512_rolv_epi64(xor3(t5, t6, s1), RHOTATES[1]));
+                s2 = perm(PI_PERM[2], _mm512_rolv_epi64(xor3(t5, t6, s2), RHOTATES[2]));
+                s3 = perm(PI_PERM[3], _mm512_rolv_epi64(xor3(t5, t6, s3), RHOTATES[3]));
+                s4 = perm(PI_PERM[4], _mm512_rolv_epi64(xor3(t5, t6, s4), RHOTATES[4]));
 
                 // Chi
-                b = chi(b0, b1, b2);
-                g = chi(b1, b2, b3);
-                k = chi(b2, b3, b4);
-                m = chi(b3, b4, b0);
-                s = chi(b4, b0, b1);
+
+                let a0 = chi(s0, s1, s2);
+                let a1 = chi(s1, s2, s3);
+                let a2 = chi(s2, s3, s4);
+                let a3 = chi(s3, s4, s0);
+                let a4 = chi(s4, s0, s1);
 
                 // Iota
-                b = _mm512_xor_si512(b, set(ROUND_CONSTANTS[i]));
 
-                // Pi - Part 2
-                let b0 = _mm512_unpacklo_epi64(b, g);
-                let b1 = _mm512_unpacklo_epi64(k, m);
-                let b0 = _mm512_permutex2var_epi64(b0, PI_2S1, s);
-                let b2 = _mm512_unpackhi_epi64(b, g);
-                let b3 = _mm512_unpackhi_epi64(k, m);
-                let b2 = _mm512_permutex2var_epi64(b2, PI_2S2, s);
+                let a0 = _mm512_mask_xor_epi64(a0, 0x01, a0, _mm512_loadu_epi64(ROUND_CONSTANTS[r + 0..].as_ptr().cast()));
 
-                b = _mm512_permutex2var_epi64(b0, PI_2BG, b1);
-                g = _mm512_permutex2var_epi64(b2, PI_2BG, b3);
-                k = _mm512_permutex2var_epi64(b0, PI_2KM, b1);
-                m = _mm512_permutex2var_epi64(b2, PI_2KM, b3);
-                let b0 = _mm512_permutex2var_epi64(b0, PI_2S3, b1);
-                s = _mm512_mask_blend_epi64(0x10, b0, s);
+                if r == 23 {
+                    // Harmonize Last Round
+
+                    let a1 = perm(THETA_PERM[0], a1);
+                    let a2 = perm(THETA_PERM[1], a2);
+                    let a3 = perm(THETA_PERM[2], a3);
+                    let a4 = perm(THETA_PERM[3], a4);
+
+                    s0 = build(a0, a1, a2, a3, a4);
+                    s1 = perm(THETA_PERM[3], build(a1, a2, a3, a4, a0));
+                    s2 = perm(THETA_PERM[2], build(a2, a3, a4, a0, a1));
+                    s3 = perm(THETA_PERM[1], build(a3, a4, a0, a1, a2));
+                    s4 = perm(THETA_PERM[0], build(a4, a0, a1, a2, a3));
+
+                    break;
+                }
+
+                // Harmonize Rounds
+
+                s0 = build(a0, a1, a2, a3, a4);
+                s1 = perm(THETA_PERM[0], build(a1, a2, a3, a4, a0));
+                s2 = perm(THETA_PERM[1], build(a2, a3, a4, a0, a1));
+                s3 = perm(THETA_PERM[2], build(a3, a4, a0, a1, a2));
+                s4 = perm(THETA_PERM[3], build(a4, a0, a1, a2, a3));
+
+                // Theta + Rho - Odd Round
+
+                let t5 = xor3(xor3(s0, s1, s2), s3, s4);
+                let t6 = perm(THETA_PERM[3], _mm512_rol_epi64::<1>(t5));
+                let t5 = perm(THETA_PERM[0], t5);
+
+                let a0 = _mm512_rolv_epi64(xor3(t5, t6, s0), RHOTATES[5]);
+                let a1 = _mm512_rolv_epi64(xor3(t5, t6, s3), RHOTATES[8]);
+                let a2 = _mm512_rolv_epi64(xor3(t5, t6, s1), RHOTATES[6]);
+                let a3 = _mm512_rolv_epi64(xor3(t5, t6, s4), RHOTATES[9]);
+                let a4 = _mm512_rolv_epi64(xor3(t5, t6, s2), RHOTATES[7]);
+
+                // Pi + Chi
+
+                s0 = chi(a0, perm(THETA_PERM[3], a0), perm(THETA_PERM[0], a0));
+                s1 = chi(perm(THETA_PERM[1], a1), perm(THETA_PERM[0], a1), a1);
+                s2 = chi(perm(THETA_PERM[3], a2), perm(THETA_PERM[2], a2), perm(THETA_PERM[1], a2));
+                s3 = chi(perm(THETA_PERM[0], a3), a3, perm(THETA_PERM[3], a3));
+                s4 = chi(perm(THETA_PERM[2], a4), perm(THETA_PERM[1], a4), perm(THETA_PERM[0], a4));
+
+                // Iota
+
+                s0 = _mm512_mask_xor_epi64(s0, 0x01, s0, _mm512_loadu_epi64(ROUND_CONSTANTS[r + 1..].as_ptr().cast()));
+
+                r += 2;
             }
-
-            Self(b, g, k, m, s)
         }
+
+        Self(s0, s1, s2, s3, s4)
     }
 }
+
+// k6 = 0xffff
+// k1 = k6 >> 15 = 0x01
+// k6 = k6 >> 11 = 0x1f
+// k2 = k1 << 1 = 0x02
+// k3 = k1 << 2 = 0x04
+// k4 = k1 << 3 = 0x08
+// k5 = k1 << 4 = 0x10
+
+// 13..=16 = THETA_PERM[0..4]
+// 22..=31 = RHOTATES_0[0..10];
+// 17..=21 = PI_PERM[0..5]
