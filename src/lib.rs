@@ -1,62 +1,50 @@
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
-    all(feature = "nightly", any(target_arch = "x86", target_arch = "x86_64"), target_feature = "avx512f"),
-    feature(stdarch_x86_avx512)
+    all(any(target_arch = "x86", target_arch = "x86_64"), feature = "nightly"),
+    feature(stdarch_x86_avx512, avx512_target_feature)
+)]
+#![cfg_attr(all(target_arch = "arm", feature = "nightly"), feature(stdarch_arm_neon_intrinsics))]
+#![cfg_attr(all(target_arch = "wasm64", feature = "nightly"), feature(simd_wasm64))]
+#![cfg_attr(
+    all(target_arch = "loongarch64", feature = "nightly"),
+    feature(stdarch_loongarch, loongarch_target_feature)
 )]
 
-use cfg_if::cfg_if;
-use core::fmt::{Display, Formatter};
-use core::ops::BitXorAssign;
+mod keccak;
 
-cfg_if! {
-    if #[cfg(all(
-        feature = "nightly",
-        any(target_arch = "x86", target_arch = "x86_64"),
-        target_feature = "avx512f"
-    ))] {
-        mod keccak_avx512;
-        pub use keccak_avx512::*;
-    } else if #[cfg(all(
-        any(target_arch = "x86", target_arch = "x86_64"),
-        target_feature = "avx2"
-    ))] {
-        mod keccak_avx2;
-        pub use keccak_avx2::*;
+pub use keccak::*;
+
+cfg_if::cfg_if! {
+    if #[cfg(any(target_arch = "x86", target_arch = "x86_64"))] {
+        mod keccakx2_x86;
+        pub use keccakx2_x86::*;
+        mod keccakx4_x86;
+        pub use keccakx4_x86::*;
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "nightly")] {
+                mod keccakx8_x86;
+                pub use keccakx8_x86::*;
+                pub const MAX_PARALLELISM: usize = 8;
+            } else {
+                pub const MAX_PARALLELISM: usize = 4;
+            }
+        }
+    } else if #[cfg(any(target_arch = "aarch64", target_arch = "arm64ec", all(target_arch = "arm", feature = "nightly")))] {
+        mod keccakx2_arm;
+        pub use keccakx2_arm::*;
+        pub const MAX_PARALLELISM: usize = 2;
+    } else if #[cfg(any(target_arch = "wasm32", all(target_arch = "wasm64", feature = "nightly")))] {
+        mod keccakx2_wasm;
+        pub use keccakx2_wasm::*;
+        pub const MAX_PARALLELISM: usize = 2;
+    } else if #[cfg(all(target_arch = "loongarch64", feature = "nightly"))] {
+        mod keccakx2_la64;
+        pub use keccakx2_la64::*;
+        mod keccakx4_la64;
+        pub use keccakx4_la64::*;
+        pub const MAX_PARALLELISM: usize = 4;
     } else {
-        mod keccak_plain;
-        pub use keccak_plain::*;
-    }
-}
-
-impl KeccakState {
-    pub fn keccak_p_inplace<const ROUNDS: usize>(&mut self) {
-        *self = self.keccak_p::<ROUNDS>();
-    }
-
-    pub fn keccak_f(&self) -> Self {
-        self.keccak_p::<24>()
-    }
-
-    pub fn keccak_f_inplace(&mut self) {
-        self.keccak_p_inplace::<24>()
-    }
-}
-
-impl<const LANES: usize> BitXorAssign<[u64; LANES]> for KeccakState {
-    fn bitxor_assign(&mut self, rhs: [u64; LANES]) {
-        *self = *self ^ rhs;
-    }
-}
-
-impl Display for KeccakState {
-    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        let state: [u64; 25] = (*self).into();
-        writeln!(f, "{:016x} {:016x} {:016x} {:016x} {:016x}", state[0], state[1], state[2], state[3], state[4])?;
-        writeln!(f, "{:016x} {:016x} {:016x} {:016x} {:016x}", state[5], state[6], state[7], state[8], state[9])?;
-        writeln!(f, "{:016x} {:016x} {:016x} {:016x} {:016x}", state[10], state[11], state[12], state[13], state[14])?;
-        writeln!(f, "{:016x} {:016x} {:016x} {:016x} {:016x}", state[15], state[16], state[17], state[18], state[19])?;
-        writeln!(f, "{:016x} {:016x} {:016x} {:016x} {:016x}", state[20], state[21], state[22], state[23], state[24])?;
-        Ok(())
+        pub const MAX_PARALLELISM: usize = 1;
     }
 }
 
@@ -87,14 +75,128 @@ const ROUND_CONSTANTS: [u64; 24] = [
     0x8000000080008008,
 ];
 
+macro_rules! keccak_impl {
+    ($state: expr, $dup: ident) => {
+        assert!(ROUNDS <= 24);
+
+        #[rustfmt::skip]
+        let [
+            mut s00, mut s01, mut s02, mut s03, mut s04,
+            mut s05, mut s06, mut s07, mut s08, mut s09,
+            mut s10, mut s11, mut s12, mut s13, mut s14,
+            mut s15, mut s16, mut s17, mut s18, mut s19,
+            mut s20, mut s21, mut s22, mut s23, mut s24
+        ]  = $state;
+
+        for &iota in &$crate::ROUND_CONSTANTS[24 - ROUNDS..] {
+            let c0 = xor(xor(xor(s00, s05), s10), xor(s15, s20));
+            let c1 = xor(xor(xor(s01, s06), s11), xor(s16, s21));
+            let c2 = xor(xor(xor(s02, s07), s12), xor(s17, s22));
+            let c3 = xor(xor(xor(s03, s08), s13), xor(s18, s23));
+            let c4 = xor(xor(xor(s04, s09), s14), xor(s19, s24));
+
+            let d0 = xor(c4, rotate_left!(c1, 1));
+            let d1 = xor(c0, rotate_left!(c2, 1));
+            let d2 = xor(c1, rotate_left!(c3, 1));
+            let d3 = xor(c2, rotate_left!(c4, 1));
+            let d4 = xor(c3, rotate_left!(c0, 1));
+
+            let tmp = s01;
+            s01 = rotate_left!(xor(s06, d1), 44);
+            s06 = rotate_left!(xor(s09, d4), 20);
+            s09 = rotate_left!(xor(s22, d2), 61);
+            s22 = rotate_left!(xor(s14, d4), 39);
+            s14 = rotate_left!(xor(s20, d0), 18);
+            s20 = rotate_left!(xor(s02, d2), 62);
+            s02 = rotate_left!(xor(s12, d2), 43);
+            s12 = rotate_left!(xor(s13, d3), 25);
+            s13 = rotate_left!(xor(s19, d4), 8);
+            s19 = rotate_left!(xor(s23, d3), 56);
+            s23 = rotate_left!(xor(s15, d0), 41);
+            s15 = rotate_left!(xor(s04, d4), 27);
+            s04 = rotate_left!(xor(s24, d4), 14);
+            s24 = rotate_left!(xor(s21, d1), 2);
+            s21 = rotate_left!(xor(s08, d3), 55);
+            s08 = rotate_left!(xor(s16, d1), 45);
+            s16 = rotate_left!(xor(s05, d0), 36);
+            s05 = rotate_left!(xor(s03, d3), 28);
+            s03 = rotate_left!(xor(s18, d3), 21);
+            s18 = rotate_left!(xor(s17, d2), 15);
+            s17 = rotate_left!(xor(s11, d1), 10);
+            s11 = rotate_left!(xor(s07, d2), 6);
+            s07 = rotate_left!(xor(s10, d0), 3);
+            s10 = rotate_left!(xor(tmp, d1), 1);
+            s00 = xor(s00, d0);
+
+            let e0 = s00;
+            let e1 = s01;
+
+            s00 = chi(s00, s01, s02);
+            s01 = chi(s01, s02, s03);
+            s02 = chi(s02, s03, s04);
+            s03 = chi(s03, s04, e0);
+            s04 = chi(s04, e0, e1);
+
+            let e0 = s05;
+            let e1 = s06;
+
+            s05 = chi(s05, s06, s07);
+            s06 = chi(s06, s07, s08);
+            s07 = chi(s07, s08, s09);
+            s08 = chi(s08, s09, e0);
+            s09 = chi(s09, e0, e1);
+
+            let e0 = s10;
+            let e1 = s11;
+
+            s10 = chi(s10, s11, s12);
+            s11 = chi(s11, s12, s13);
+            s12 = chi(s12, s13, s14);
+            s13 = chi(s13, s14, e0);
+            s14 = chi(s14, e0, e1);
+
+            let e0 = s15;
+            let e1 = s16;
+
+            s15 = chi(s15, s16, s17);
+            s16 = chi(s16, s17, s18);
+            s17 = chi(s17, s18, s19);
+            s18 = chi(s18, s19, e0);
+            s19 = chi(s19, e0, e1);
+
+            let e0 = s20;
+            let e1 = s21;
+
+            s20 = chi(s20, s21, s22);
+            s21 = chi(s21, s22, s23);
+            s22 = chi(s22, s23, s24);
+            s23 = chi(s23, s24, e0);
+            s24 = chi(s24, e0, e1);
+
+            s00 = xor(s00, $dup(iota as _));
+        }
+
+        #[rustfmt::skip]
+        return [
+            s00, s01, s02, s03, s04,
+            s05, s06, s07, s08, s09,
+            s10, s11, s12, s13, s14,
+            s15, s16, s17, s18, s19,
+            s20, s21, s22, s23, s24,
+        ];
+    };
+}
+
+use keccak_impl;
+
 #[cfg(test)]
 mod tests {
     use crate::*;
 
     #[test]
     fn keccak_f_test() {
-        let mut input = KeccakState::from([0; 25]);
-        input.keccak_f_inplace();
+        let mut input = [0; 25];
+        input = keccak_f(&input);
         #[rustfmt::skip]
         assert_eq!(input, [
             0xf1258f7940e1dde7, 0x84d5ccf933c0478a, 0xd598261ea65aa9ee, 0xbd1547306f80494d, 0x8b284e056253d057,
@@ -102,8 +204,8 @@ mod tests {
             0xeb5aa93f2317d635, 0xa9a6e6260d712103, 0x81a57c16dbcf555f, 0x43b831cd0347c826, 0x01f22f1a11a5569f,
             0x05e5635a21d9ae61, 0x64befef28cc970f2, 0x613670957bc46611, 0xb87c5a554fd00ecb, 0x8c3ee88a1ccf32c8,
             0x940c7922ae3a2614, 0x1841f924a2c509e4, 0x16f53526e70465c2, 0x75f644e97f30a13b, 0xeaf1ff7b5ceca249
-        ].into());
-        input.keccak_f_inplace();
+        ]);
+        input = keccak_f(&input);
         #[rustfmt::skip]
         assert_eq!(input, [
             0x2d5c954df96ecb3c, 0x6a332cd07057b56d, 0x093d8d1270d76b6c, 0x8a20d9b25569d094, 0x4f9c4f99e5e7f156,
@@ -111,29 +213,63 @@ mod tests {
             0x68ce61b6b9ce68a1, 0xdeea66c4ba8f974f, 0x33c43d836eafb1f5, 0xe00654042719dbd9, 0x7cf8a9f009831265,
             0xfd5449a6bf174743, 0x97ddad33d8994b40, 0x48ead5fc5d0be774, 0xe3b8c8ee55b7b03c, 0x91a0226e649e42e9,
             0x900e3129e7badd7b, 0x202a9ec5faa3cce8, 0x5b3402464e1c3db6, 0x609f4e62a44c1059, 0x20d06cd26a8fbf5c
-        ].into());
+        ]);
+    }
+
+    macro_rules! test_keccak_f_parallel {
+        ($n:literal, $fn:ident, $int:ident, $uint:ident) => {
+            let mut input = [[0; 25]; $n];
+            for i in 0..$n {
+                input[i][0] = i as u64;
+            }
+            assert_eq!(unsafe { $uint(&$fn(&$int(&input))) }, input.map(|state| keccak_f(&state)))
+        };
+        (2) => {
+            test_keccak_f_parallel!(2, keccak_f_parallel2, interleave_state2, uninterleave_state2);
+        };
+        (4) => {
+            test_keccak_f_parallel!(4, keccak_f_parallel4, interleave_state4, uninterleave_state4)
+        };
+        (8) => {
+            test_keccak_f_parallel!(8, keccak_f_parallel8, interleave_state8, uninterleave_state8)
+        };
     }
 
     #[test]
-    fn xor_test() {
-        let mut state = KeccakState::from([0; 25]);
-        state ^= [1, 2, 3, 4, 5, 6];
-        #[rustfmt::skip]
-        assert_eq!(state, [
-            1, 2, 3, 4, 5,
-            6, 0, 0, 0, 0,
-            0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0,
-        ].into());
-        state ^= [1, 2, 3];
-        #[rustfmt::skip]
-        assert_eq!(state, [
-            0, 0, 0, 4, 5,
-            6, 0, 0, 0, 0,
-            0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0,
-        ].into());
+    fn keccak_f_parallel2_test() {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if std::arch::is_x86_feature_detected!("sse2") {
+            test_keccak_f_parallel!(2);
+        }
+        #[cfg(any(target_arch = "aarch64", target_arch = "arm64ec"))]
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            test_keccak_f_parallel!(2);
+        }
+        #[cfg(all(target_arch = "arm", feature = "nightly"))]
+        if std::arch::is_arm_feature_detected!("neon") {
+            test_keccak_f_parallel!(2);
+        }
+        #[cfg(any(target_arch = "wasm32", all(target_arch = "wasm32", feature = "nightly")))]
+        test_keccak_f_parallel!(2);
+        #[cfg(all(target_arch = "loongarch64", feature = "nightly", target_feature = "lsx"))]
+        test_keccak_f_parallel!(2);
+    }
+
+    #[test]
+    fn keccak_f_parallel4_test() {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if std::arch::is_x86_feature_detected!("avx2") {
+            test_keccak_f_parallel!(4);
+        }
+        #[cfg(all(target_arch = "loongarch64", feature = "nightly", target_feature = "lasx"))]
+        test_keccak_f_parallel!(4);
+    }
+
+    #[test]
+    fn keccak_f_parallel8_test() {
+        #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "nightly"))]
+        if std::arch::is_x86_feature_detected!("avx512f") {
+            test_keccak_f_parallel!(8);
+        }
     }
 }
