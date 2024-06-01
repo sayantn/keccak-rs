@@ -1,4 +1,3 @@
-#![cfg_attr(not(test), no_std)]
 #![cfg_attr(
     all(any(target_arch = "x86", target_arch = "x86_64"), feature = "nightly"),
     feature(stdarch_x86_avx512, avx512_target_feature)
@@ -9,21 +8,20 @@
     all(target_arch = "loongarch64", feature = "nightly"),
     feature(stdarch_loongarch, loongarch_target_feature)
 )]
+#![allow(unused)] // todo: remove before merge
 
 mod keccak;
+pub mod parallel_keccak;
 
 pub use keccak::*;
 
 cfg_if::cfg_if! {
     if #[cfg(any(target_arch = "x86", target_arch = "x86_64"))] {
         mod keccakx2_x86;
-        pub use keccakx2_x86::*;
         mod keccakx4_x86;
-        pub use keccakx4_x86::*;
         cfg_if::cfg_if! {
             if #[cfg(feature = "nightly")] {
                 mod keccakx8_x86;
-                pub use keccakx8_x86::*;
                 pub const MAX_PARALLELISM: usize = 8;
             } else {
                 pub const MAX_PARALLELISM: usize = 4;
@@ -31,17 +29,13 @@ cfg_if::cfg_if! {
         }
     } else if #[cfg(any(target_arch = "aarch64", target_arch = "arm64ec", all(target_arch = "arm", feature = "nightly")))] {
         mod keccakx2_arm;
-        pub use keccakx2_arm::*;
         pub const MAX_PARALLELISM: usize = 2;
     } else if #[cfg(any(target_arch = "wasm32", all(target_arch = "wasm64", feature = "nightly")))] {
         mod keccakx2_wasm;
-        pub use keccakx2_wasm::*;
         pub const MAX_PARALLELISM: usize = 2;
     } else if #[cfg(all(target_arch = "loongarch64", feature = "nightly"))] {
         mod keccakx2_la64;
-        pub use keccakx2_la64::*;
         mod keccakx4_la64;
-        pub use keccakx4_la64::*;
         pub const MAX_PARALLELISM: usize = 4;
     } else {
         pub const MAX_PARALLELISM: usize = 1;
@@ -214,62 +208,5 @@ mod tests {
             0xfd5449a6bf174743, 0x97ddad33d8994b40, 0x48ead5fc5d0be774, 0xe3b8c8ee55b7b03c, 0x91a0226e649e42e9,
             0x900e3129e7badd7b, 0x202a9ec5faa3cce8, 0x5b3402464e1c3db6, 0x609f4e62a44c1059, 0x20d06cd26a8fbf5c
         ]);
-    }
-
-    macro_rules! test_keccak_f_parallel {
-        ($n:literal, $fn:ident, $int:ident, $uint:ident) => {
-            let mut input = [[0; 25]; $n];
-            for i in 0..$n {
-                input[i][0] = i as u64;
-            }
-            assert_eq!(unsafe { $uint(&$fn(&$int(&input))) }, input.map(|state| keccak_f(&state)))
-        };
-        (2) => {
-            test_keccak_f_parallel!(2, keccak_f_parallel2, interleave_state2, uninterleave_state2);
-        };
-        (4) => {
-            test_keccak_f_parallel!(4, keccak_f_parallel4, interleave_state4, uninterleave_state4)
-        };
-        (8) => {
-            test_keccak_f_parallel!(8, keccak_f_parallel8, interleave_state8, uninterleave_state8)
-        };
-    }
-
-    #[test]
-    fn keccak_f_parallel2_test() {
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        if std::arch::is_x86_feature_detected!("sse2") {
-            test_keccak_f_parallel!(2);
-        }
-        #[cfg(any(target_arch = "aarch64", target_arch = "arm64ec"))]
-        if std::arch::is_aarch64_feature_detected!("neon") {
-            test_keccak_f_parallel!(2);
-        }
-        #[cfg(all(target_arch = "arm", feature = "nightly"))]
-        if std::arch::is_arm_feature_detected!("neon") {
-            test_keccak_f_parallel!(2);
-        }
-        #[cfg(any(target_arch = "wasm32", all(target_arch = "wasm32", feature = "nightly")))]
-        test_keccak_f_parallel!(2);
-        #[cfg(all(target_arch = "loongarch64", feature = "nightly", target_feature = "lsx"))]
-        test_keccak_f_parallel!(2);
-    }
-
-    #[test]
-    fn keccak_f_parallel4_test() {
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        if std::arch::is_x86_feature_detected!("avx2") {
-            test_keccak_f_parallel!(4);
-        }
-        #[cfg(all(target_arch = "loongarch64", feature = "nightly", target_feature = "lasx"))]
-        test_keccak_f_parallel!(4);
-    }
-
-    #[test]
-    fn keccak_f_parallel8_test() {
-        #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "nightly"))]
-        if std::arch::is_x86_feature_detected!("avx512f") {
-            test_keccak_f_parallel!(8);
-        }
     }
 }
