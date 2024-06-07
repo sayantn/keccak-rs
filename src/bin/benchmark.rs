@@ -1,7 +1,6 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use keccak::parallel_keccak::ParallelKeccakState;
 use keccak::*;
 
 const ITERS: usize = 50000;
@@ -68,6 +67,6 @@ fn main() {
     let end = Instant::now();
 
     println!("serial speed: {} ns/chunk", (end - start).as_nanos() as f64 / ITERS as f64);
-    
+
     bench_parallel!(1, 2, 4, 8, 16);
 }

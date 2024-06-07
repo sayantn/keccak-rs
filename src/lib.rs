@@ -1,6 +1,7 @@
 mod keccak;
-pub mod parallel_keccak;
+mod parallel_keccak;
 
+pub use parallel_keccak::*;
 pub use keccak::*;
 
 const ROUND_CONSTANTS: [u64; 24] = [
@@ -55,5 +56,15 @@ mod tests {
             0xfd5449a6bf174743, 0x97ddad33d8994b40, 0x48ead5fc5d0be774, 0xe3b8c8ee55b7b03c, 0x91a0226e649e42e9,
             0x900e3129e7badd7b, 0x202a9ec5faa3cce8, 0x5b3402464e1c3db6, 0x609f4e62a44c1059, 0x20d06cd26a8fbf5c
         ]);
+    }
+    
+    #[test]
+    fn parallel_keccak_test() {
+        let states = [[0; 25], [1; 25]];
+        let mut parallel = ParallelKeccakState::from(states);
+        parallel.keccak_f();
+        let results = <[[u64; 25]; 2]>::from(parallel);
+        assert_eq!(results[0], keccak_f(&states[0]));
+        assert_eq!(results[1], keccak_f(&states[1]));
     }
 }
