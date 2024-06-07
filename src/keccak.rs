@@ -1,7 +1,7 @@
 use crate::ROUND_CONSTANTS;
 
-pub fn keccak_p<const ROUNDS: usize>(state: &[u64; 25]) -> [u64; 25] {
-    assert!(ROUNDS <= 24);
+pub fn keccak_p(state: &[u64; 25], rounds: usize) -> [u64; 25] {
+    assert!(rounds <= 24);
 
     #[rustfmt::skip]
     let [
@@ -12,7 +12,7 @@ pub fn keccak_p<const ROUNDS: usize>(state: &[u64; 25]) -> [u64; 25] {
         mut s20, mut s21, mut s22, mut s23, mut s24
     ]  = state;
 
-    for &iota in &ROUND_CONSTANTS[24 - ROUNDS..] {
+    for &iota in &ROUND_CONSTANTS[24 - rounds..] {
         let c0 = s00 ^ s05 ^ s10 ^ s15 ^ s20;
         let c1 = s01 ^ s06 ^ s11 ^ s16 ^ s21;
         let c2 = s02 ^ s07 ^ s12 ^ s17 ^ s22;
@@ -111,5 +111,5 @@ pub fn keccak_p<const ROUNDS: usize>(state: &[u64; 25]) -> [u64; 25] {
 }
 
 pub fn keccak_f(state: &[u64; 25]) -> [u64; 25] {
-    keccak_p::<24>(state)
+    keccak_p(state, 24)
 }
